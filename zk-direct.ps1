@@ -215,6 +215,60 @@ function Find-MapArchive([string]$map) {
 
 function Test-MapInstalled([string]$map) { [bool](Find-MapArchive $map) }
 
+# Maps the engine has scanned (archive cache entries with modtype 3): the exact names it wants, and their files.
+function Get-InstalledMaps {
+    $cache = Get-ChildItem (Join-Path $ZkDir 'cache') -Filter 'ArchiveCache*.lua' -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
+    if (-not $cache) { return }
+    $file = $null; $dir = $null; $prev = ''; $inData = $false; $type = $null
+    foreach ($line in [IO.File]::ReadLines($cache.FullName)) {
+        if ($line -match '^\s*path = "(.*)",$') {
+            $dir = $Matches[1]
+            $file = if ($prev -match '^\s*name = "(.*)",$') { $Matches[1] }
+            $inData = $false; $type = $null
+        } elseif ($line -match '^\s*archivedata = \{') { $inData = $true }
+        elseif ($inData -and $line -match '^\s*modtype = (\d+)') { $type = [int]$Matches[1] }
+        elseif ($inData -and $file -and $line -match '^\s*name = "(.*)",$') {
+            if ($type -eq 3) { [pscustomobject]@{ Name = $Matches[1]; File = $file; Path = [IO.Path]::Combine($dir, $file) } }
+            $inData = $false
+        }
+        $prev = $line
+    }
+}
+
+function Get-NameKey([string]$s) { ($s.ToLower() -replace '\.(sd7|sdz)$', '') -replace '[^a-z0-9]', '' }
+
+# What was typed after /map (or -Map) -> the map's exact name, which the engine needs: "TitanDuel_2.2", "titanduel 2.2",
+# "titanduel_2.2.sd7" and "titanduel" all mean "TitanDuel 2.2". Installed maps first, then springfiles.
+# $null, after saying why, if it isn't clear which map.
+function Resolve-MapName([string]$typed) {
+    $typed = $typed.Trim().Trim('"')
+    $key = Get-NameKey $typed
+    $maps = @(Get-InstalledMaps | Where-Object { Test-Path $_.Path })
+    $hit = $maps | Where-Object { $_.Name -eq $typed } | Select-Object -First 1
+    if (-not $hit) { $hit = $maps | Where-Object { (Get-NameKey $_.Name) -eq $key -or (Get-NameKey $_.File) -eq $key } | Select-Object -First 1 }
+    if ($hit) { return $hit.Name }
+    $part = @($maps | Where-Object { $_.Name.IndexOf($typed, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+    if ($part.Count -eq 1) { return $part[0].Name }
+
+    # springfiles: as typed ('_' matches any character there), then with '*' for separators, then anything containing it
+    $query = $typed -replace '\.(sd7|sdz)$', ''
+    $loose = $query -replace '[\s_.-]+', '*'
+    $found = @()
+    foreach ($q in $query, $loose, "*$loose*") {
+        # ForEach-Object unrolls the JSON array, which Windows PowerShell returns as a single object
+        try { $found = @(Invoke-RestMethod "https://springfiles.springrts.com/json.php?nosensitive=on&category=map&springname=$([Uri]::EscapeDataString($q))" -TimeoutSec 10 | ForEach-Object { $_ }) }
+        catch { Say "Couldn't search springfiles for '$typed': $($_.Exception.Message)" Red; break }
+        if ($found.Count) { break }
+    }
+    $exact = $found | Where-Object { (Get-NameKey $_.springname) -eq $key } | Select-Object -First 1
+    if ($exact) { return $exact.springname }
+    if ($found.Count -eq 1) { return $found[0].springname }
+    $suggest = @(@($part | ForEach-Object Name) + @($found | ForEach-Object springname) | Select-Object -Unique -First 8)
+    if ($suggest.Count) { Say "Which map did you mean? $($suggest -join ', ')" Red }
+    else { Say "There's no map called '$typed', installed or on springfiles." Red }
+    $null
+}
+
 function Invoke-Download([string]$kind, [string]$what) {
     Say "Downloading $kind '$what'..." Yellow
     if ($script:ui) { $script:ui.Status.Text = "Downloading $kind '$what'..."; $script:ui.Form.Refresh() }  # the window waits for it
@@ -554,7 +608,11 @@ function Invoke-HostCommand([string]$line, $from) {
             return
         }
         '^/map\s+(.+)$' {
-            $script:MapName = $Matches[1].Trim()
+            $typed = $Matches[1].Trim()
+            $resolved = Resolve-MapName $typed
+            if (-not $resolved) { Say "Still on $($script:MapName)." Red; return }
+            if ($resolved -ne $typed) { Say "Map: $resolved" DarkGray }
+            $script:MapName = $resolved
             foreach ($c in $script:conns) { if ($c.Transfer) { Stop-MapSend $c; Send-Msg $c 'MAPABORT' $null } }
             foreach ($p in $script:players) { $p.Downloading = $false }  # downloads of the old map no longer matter
             Confirm-Content $script:GameName $script:MapName
@@ -580,6 +638,7 @@ function Start-Match {
     if ($busy.Count) { Say "Still in the last game: $($busy -join ', '). Wait for them to close it, or /kick them." Red; return }
     $busy = @($script:players | Where-Object Downloading | ForEach-Object Name)
     if ($busy.Count) { Say "Still getting the map: $($busy -join ', '). Wait for them, or /kick them." Red; return }
+    if (-not (Test-MapInstalled $script:MapName)) { Say "You don't have $($script:MapName) yourself (its download failed). Pick another with /map." Red; return }
     $going = @($script:players | Where-Object { -not (Test-MissingMap $_) })
     if (-not (@($going | Where-Object Team -gt 0).Count + $script:bots.Count)) { Say "Nobody is on a team." Red; return }
     $hostScript = Build-HostScript $going
@@ -1202,7 +1261,8 @@ function Show-JoinInfo {
 function Open-Host {
     $script:EngineName = Split-Path $script:EngineDir -Leaf
     $script:GameName = Resolve-GameName $Game
-    $script:MapName = $Map
+    $script:MapName = Resolve-MapName $Map
+    if (-not $script:MapName) { throw "Pick a map that exists with -Map." }
     Confirm-Content $script:GameName $script:MapName
 
     $script:players = [Collections.Generic.List[object]]::new()
