@@ -2,7 +2,7 @@
 
 Play Zero-K multiplayer by direct IP while the official servers are down. Windows only; needs Zero-K installed (Steam or standalone).
 
-If your install is missing engine `2026.07.04` or Zero-K `v1.14.10.3`, download `engine-2026.07.04-win64.zip` and `zero-k-v1.14.10.3.sdz` from the Releases page into `bundle\`. The script copies them into your install.
+Download the zip from the Releases page and extract it anywhere. It includes engine `2026.07.04` and Zero-K `v1.14.10.3`, which are copied into your install if it doesn't have them.
 
 ## Join a game
 
@@ -48,4 +48,5 @@ Anything that isn't a command is chat. Players can use `/spec`, `/play` and `/te
 
 ```
 bundle\make-bundle.ps1 -ZkPath <a Zero-K install with the new version> [-Engine 2026.07.04] [-Game zk:stable]
+.\make-release.ps1    # writes dist\zk-direct-<game>.zip for the Releases page
 ```

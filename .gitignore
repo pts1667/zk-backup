@@ -1,3 +1,6 @@
 # Large bundle files ship as release assets, not in git
 bundle/*.zip
 bundle/*.sdz
+
+# Release zips (make-release.ps1)
+dist/

@@ -137,7 +137,7 @@ function Get-Bundle {
 
 function Get-BundleFile([string]$name) {
     $path = Join-Path $bundleDir $name
-    if (-not (Test-Path $path)) { Write-Note "No bundle\$name; download it from the repo's Releases page into bundle\ to have it installed."; return }
+    if (-not (Test-Path $path)) { Write-Note "No bundle\$name; the zip on the repo's Releases page includes it."; return }
     $path
 }
 
