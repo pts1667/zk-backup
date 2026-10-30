@@ -1,0 +1,3 @@
+# Large bundle files ship as release assets, not in git
+bundle/*.zip
+bundle/*.sdz
