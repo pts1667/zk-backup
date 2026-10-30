@@ -11,6 +11,7 @@ and connects straight to the host's game (UDP, same port number).
   Join:    zk-direct.cmd join 203.0.113.5 -Name Bob   (in the terminal)
   Host:    zk-direct.cmd host -Name Tom [-Map "TitanDuel 2.2"] [-Port 8452]   (in the terminal)
   Link:    zk-direct.cmd install   (once; then zkjoinbk://203.0.113.5:8452 links open the join window)
+  Linux:   ./zk-direct.sh join|host ...   (PowerShell 7, terminal only; uses the engine Zero-K.exe put in engine/linux64)
 
 Players reach the host in one of two ways, and a lobby takes both at once:
   - Directly on -Port, over BOTH TCP and UDP. The host asks the router to forward it (UPnP; -NoUpnp to
@@ -22,7 +23,7 @@ Players reach the host in one of two ways, and a lobby takes both at once:
 The Zero-K folder (the one containing engine\) is found from, in order: -ZkDir (alias -ZkPath),
 the ZK_DIR environment variable, the last folder used, this script's folder, Steam libraries,
 common install places; the window asks to confirm it once, the terminal only asks if none is found.
-The choice and your name are remembered in %LOCALAPPDATA%\zk-direct. Your name defaults to
+The choice and your name are remembered in %LOCALAPPDATA%\zk-direct (~/.config/zk-direct on Linux). Your name defaults to
 the one you log in to Zero-K with.
 #>
 param(
@@ -43,7 +44,11 @@ $ErrorActionPreference = 'Stop'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $scriptPath = $MyInvocation.MyCommand.Path
 $scriptDir = Split-Path -Parent $scriptPath
-$configDir = Join-Path $env:LOCALAPPDATA 'zk-direct'
+$onLinux = [bool]$IsLinux  # PowerShell 7 via zk-direct.sh; $IsLinux doesn't exist in Windows PowerShell
+$exeSuffix = if ($onLinux) { '' } else { '.exe' }
+$engineSubdir = [IO.Path]::Combine('engine', $(if ($onLinux) { 'linux64' } else { 'win64' }))
+$configDir = if ($onLinux) { Join-Path $(if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path $HOME '.config' }) 'zk-direct' }
+             else { Join-Path $env:LOCALAPPDATA 'zk-direct' }
 $nameFile = Join-Path $configDir 'name.txt'
 $zkDirFile = Join-Path $configDir 'zkdir.txt'
 $addressFile = Join-Path $configDir 'address.txt'
@@ -58,15 +63,18 @@ $aiDifficulties = 'Beginner', 'Novice', 'Easy', 'Normal', 'Hard', 'Brutal'
 # ---------------------------------------------------------------- content
 
 # [IO.Path]::Combine rather than Join-Path, which throws on a missing drive (e.g. an unplugged Steam library)
-function Test-ZkDir([string]$dir) { $dir -and (Test-Path ([IO.Path]::Combine($dir, 'engine', 'win64'))) }
+function Test-ZkDir([string]$dir) { $dir -and (Test-Path ([IO.Path]::Combine($dir, $engineSubdir))) }
 
 function Get-SteamZkDirs {
-    $steam = (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamPath
-    if (-not $steam) { return }
-    $libraries = @($steam)
-    $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
-    if (Test-Path $vdf) { $libraries += [regex]::Matches((Get-Content $vdf -Raw), '"path"\s+"([^"]+)"') | ForEach-Object { $_.Groups[1].Value -replace '\\\\', '\' } }
-    $libraries | ForEach-Object { [IO.Path]::Combine($_, 'steamapps', 'common', 'Zero-K') }
+    $steams = if ($onLinux) { '.local/share/Steam', '.steam/steam', '.var/app/com.valvesoftware.Steam/.local/share/Steam' | ForEach-Object { Join-Path $HOME $_ } }
+              else { (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamPath }
+    foreach ($steam in $steams) {
+        if (-not $steam -or -not (Test-Path $steam)) { continue }
+        $libraries = @($steam)
+        $vdf = [IO.Path]::Combine($steam, 'steamapps', 'libraryfolders.vdf')
+        if (Test-Path $vdf) { $libraries += [regex]::Matches((Get-Content $vdf -Raw), '"path"\s+"([^"]+)"') | ForEach-Object { $_.Groups[1].Value -replace '\\\\', '\' } }
+        $libraries | ForEach-Object { [IO.Path]::Combine($_, 'steamapps', 'common', 'Zero-K') }
+    }
 }
 
 function Get-SavedSetting([string]$file) {
@@ -87,8 +95,10 @@ function Get-ZkDirCandidates {
     Split-Path $scriptDir
     Get-SteamZkDirs
     foreach ($root in ${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA) { if ($root) { Join-Path $root 'Zero-K' } }
-    # standalone installs are often unzipped somewhere like Downloads\zero-k-portable
-    foreach ($parent in (Join-Path $env:USERPROFILE 'Downloads'), [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('MyDocuments'), 'C:\Games') {
+    # standalone installs are often unzipped somewhere like Downloads\zero-k-portable (on Linux, wherever Zero-K.exe was put)
+    $parents = if ($onLinux) { $HOME, (Join-Path $HOME 'Downloads'), (Join-Path $HOME 'Games'), (Join-Path $HOME '.local/share') }
+               else { (Join-Path $env:USERPROFILE 'Downloads'), [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('MyDocuments'), 'C:\Games' }
+    foreach ($parent in $parents) {
         if ($parent -and (Test-Path $parent)) { Get-ChildItem $parent -Directory -ErrorAction SilentlyContinue | ForEach-Object FullName }
     }
 }
@@ -99,11 +109,12 @@ function Get-DefaultZkDir {
 }
 
 function Find-ZkDir {
-    if ($ZkDir -and -not (Test-ZkDir $ZkDir)) { throw "'$ZkDir' isn't a Zero-K folder (no engine\win64 inside)." }
+    if ($ZkDir -and -not (Test-ZkDir $ZkDir)) { throw "'$ZkDir' isn't a Zero-K folder (no $engineSubdir inside)." }
     $found = Get-DefaultZkDir
     while (-not $found) {
-        $answer = (Read-Host 'Path to your Zero-K folder (the one containing engine\)').Trim('" ')
-        if (Test-ZkDir $answer) { $found = (Resolve-Path $answer).Path } else { Write-Host "No engine\win64 in '$answer'." -ForegroundColor Red }
+        $answer = (Read-Host "Path to your Zero-K folder (the one containing $engineSubdir)").Trim('" ')
+        if ($onLinux -and $answer -match '^~') { $answer = $HOME + $answer.Substring(1) }
+        if (Test-ZkDir $answer) { $found = (Resolve-Path $answer).Path } else { Write-Host "No $engineSubdir in '$answer'." -ForegroundColor Red }
     }
     Save-Setting $zkDirFile $found
     $found
@@ -119,11 +130,14 @@ function Get-ZkLoginName([string]$dir) {
 }
 
 function Get-EngineDir([string]$version, [string]$dir = $ZkDir) {
-    $root = Join-Path $dir 'engine\win64'
+    $root = Join-Path $dir $engineSubdir
     if ($version) { return Join-Path $root $version }
-    $dirs = Get-ChildItem $root -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'spring.exe') }
+    $dirs = Get-ChildItem $root -Directory | Where-Object { Test-Path (Get-EngineExe 'spring' $_.FullName) }
     ($dirs | Sort-Object { [version]($_.Name -replace '[^\d.].*$', '') } | Select-Object -Last 1).FullName
 }
+
+# 'spring' -> ...\spring.exe, or .../spring on Linux
+function Get-EngineExe([string]$name, [string]$engineDir = $script:EngineDir) { Join-Path $engineDir "$name$exeSuffix" }
 
 function Get-RapidEntries {
     $file = Join-Path $ZkDir 'rapid\repos.springrts.com\zk\versions.gz'
@@ -156,7 +170,7 @@ function Install-Bundle {
     $bundle = Get-Bundle
     if (-not $bundle) { return }
     $engineDir = Join-Path $ZkDir "engine\win64\$($bundle.Engine)"
-    if (-not (Test-Path (Join-Path $engineDir 'spring.exe'))) {
+    if (-not $onLinux -and -not (Test-Path (Join-Path $engineDir 'spring.exe'))) {  # the bundled engine is the Windows build
         $zip = Get-BundleFile $bundle.EngineZip
         if ($zip) {
             Write-Note "Installing bundled engine $($bundle.Engine)..."
@@ -272,7 +286,7 @@ function Resolve-MapName([string]$typed) {
 function Invoke-Download([string]$kind, [string]$what) {
     Say "Downloading $kind '$what'..." Yellow
     if ($script:ui) { $script:ui.Status.Text = "Downloading $kind '$what'..."; $script:ui.Form.Refresh() }  # the window waits for it
-    & (Join-Path $script:EngineDir 'pr-downloader.exe') --filesystem-writepath $ZkDir "--download-$kind" $what | Out-Host
+    & (Get-EngineExe 'pr-downloader') --filesystem-writepath $ZkDir "--download-$kind" $what | Out-Host
     if ($LASTEXITCODE -ne 0) { Say "Couldn't download $kind '$what'. Get it manually or the game will fail to load." Red }
 }
 
@@ -293,25 +307,40 @@ function Get-BotShortName([string]$difficulty) {
 function Start-Spring([string]$scriptText) {
     $path = Join-Path $ZkDir "zk-direct-$Mode.txt"  # per role, so a local host+join test doesn't overwrite the host's script
     [IO.File]::WriteAllText($path, $scriptText, $utf8)
-    Start-Process -PassThru -FilePath (Join-Path $script:EngineDir 'spring.exe') -WorkingDirectory $ZkDir `
-        -ArgumentList '--write-dir', "`"$ZkDir`"", "`"$path`""
+    Start-EngineProgram 'spring' '--write-dir', "`"$ZkDir`"", "`"$path`""
+}
+
+# A program from the engine folder, without waiting for it. On Windows -Hidden keeps its console window away;
+# on Linux its output, which would scribble over the lobby, goes to <config>/<name>.log instead.
+function Start-EngineProgram([string]$name, [string[]]$arguments, [switch]$Hidden) {
+    $start = @{ FilePath = (Get-EngineExe $name); ArgumentList = $arguments; WorkingDirectory = $ZkDir; PassThru = $true }
+    if ($onLinux) {
+        [void](New-Item $configDir -ItemType Directory -Force)
+        $start.RedirectStandardOutput = Join-Path $configDir "$name.log"
+        $start.RedirectStandardError = Join-Path $configDir "$name-errors.log"
+    } elseif ($Hidden) { $start.WindowStyle = 'Hidden' }
+    Start-Process @start
 }
 
 # ---------------------------------------------------------------- console
 
 $script:inputBuf = ''
 
-function Show-Prompt {
-    $width = 80
+# Spaces that blank the current line (the prompt), to write over it.
+function Get-BlankLine {
+    $width = 0
     try { $width = [Console]::WindowWidth } catch {}
-    [Console]::Write("`r" + (' ' * ($width - 1)) + "`r> " + $script:inputBuf)
+    if ($width -lt 2) { $width = 80 }  # no console, or a terminal that doesn't say its size
+    ' ' * ($width - 1)
+}
+
+function Show-Prompt {
+    [Console]::Write("`r" + (Get-BlankLine) + "`r> " + $script:inputBuf)
 }
 
 function Say([string]$msg, [string]$color = 'Gray') {
     if ($script:ui) { Write-GuiLog $msg $color; return }
-    $width = 80
-    try { $width = [Console]::WindowWidth } catch {}
-    [Console]::Write("`r" + (' ' * ($width - 1)) + "`r")
+    [Console]::Write("`r" + (Get-BlankLine) + "`r")
     Write-Host $msg -ForegroundColor $color
     Show-Prompt
 }
@@ -661,6 +690,7 @@ $upnpDescription = 'Zero-K Direct'
 function Open-UpnpPort {
     $script:upnp = $null
     if ($NoUpnp) { return }
+    if ($onLinux) { Open-UpnpcPort; return }
     Say "Asking the router to open port $Port (UPnP)..." DarkGray
     $maps = $null
     try { $maps = (New-Object -ComObject HNetCfg.NATUPnP).StaticPortMappingCollection } catch {}
@@ -701,8 +731,49 @@ function Open-UpnpPort {
 
 function Close-UpnpPort {
     if (-not $script:upnp) { return }
-    foreach ($proto in $script:upnp.Ours) { try { $script:upnp.Maps.Remove($Port, $proto) } catch {} }
+    foreach ($proto in $script:upnp.Ours) {
+        try { if ($onLinux) { [void](Invoke-Upnpc '-d', $Port, $proto) } else { $script:upnp.Maps.Remove($Port, $proto) } } catch {}
+    }
     $script:upnp = $null
+}
+
+# Linux has no UPnP built in; miniupnpc's upnpc does the same as Open-UpnpPort above, when it's installed.
+function Invoke-Upnpc([string[]]$arguments) {
+    if ($script:upnp -and $script:upnp.Url) { $arguments = @('-u', $script:upnp.Url) + $arguments }  # skips finding the router again
+    (& upnpc @arguments 2>&1 | ForEach-Object { "$_" }) -join "`n"
+}
+
+function Open-UpnpcPort {
+    if (-not (Get-Command upnpc -CommandType Application -ErrorAction SilentlyContinue)) {
+        Say "Port $Port wasn't opened automatically: install miniupnpc (it provides upnpc) for that, or forward it on your router." Yellow
+        return
+    }
+    Say "Asking the router to open port $Port (UPnP)..." DarkGray
+    $list = Invoke-Upnpc '-l'
+    if ($list -notmatch 'Local LAN ip address\s*:\s*(\S+)') { Say "No UPnP router answered, so port $Port wasn't opened automatically." Yellow; return }
+    $myIp = $Matches[1]
+    # other UPnP devices (TVs, printers) are listed too: the router's description is on the same host as its control URL
+    $igd = [regex]::Match($list, 'IGD[^:\n]*: (http\S+)').Groups[1].Value
+    $url = [regex]::Matches($list, '(?m)^\s*desc: (http\S+)') | ForEach-Object { $_.Groups[1].Value } |
+        Where-Object { $igd -and ([Uri]$_).Authority -eq ([Uri]$igd).Authority } | Select-Object -First 1
+    $script:upnp = [pscustomobject]@{ Url = $url; Ours = @(); Open = @(); ExternalIp = $(if ($list -match 'ExternalIPAddress = (\S+)') { $Matches[1] }) }
+    foreach ($proto in 'TCP', 'UDP') {
+        # the mapping list's lines look like " 0 TCP  8452->192.168.1.5:8452  'Zero-K Direct' '' 0"
+        $existing = [regex]::Match($list, "(?m)^\s*\d+\s+$proto\s+$Port->([\d.]+):\d+\s+'([^']*)'")
+        $to = $existing.Groups[1].Value
+        $desc = $existing.Groups[2].Value
+        if ($existing.Success -and $to -eq $myIp) {
+            if ($desc -eq $upnpDescription) { $script:upnp.Ours += $proto }  # left over from a lobby that was killed
+            $script:upnp.Open += $proto
+            continue
+        }
+        if ($existing.Success -and $desc -ne $upnpDescription) { Say "The router already forwards port $Port/$proto to $to; leaving that alone." Red; continue }
+        if ($existing.Success) { [void](Invoke-Upnpc '-d', $Port, $proto) }  # ours, for this PC's old address
+        $out = Invoke-Upnpc '-e', $upnpDescription, '-a', $myIp, $Port, $Port, $proto
+        if ($out -match 'is redirected to') { $script:upnp.Ours += $proto; $script:upnp.Open += $proto }
+        else { Say "The router wouldn't open port $Port/${proto}: $(@($out -split "`n" | Where-Object { $_ })[-1])" Red }
+    }
+    if ($script:upnp.Open.Count -eq 2) { Say "The router forwards port $Port (TCP+UDP) to this PC until the lobby closes." Green }
 }
 
 # ---------------------------------------------------------------- Cloudflare quick tunnel
@@ -755,7 +826,10 @@ namespace ZkDirect
         }
 
         // Otherwise Windows fails the next receive when a datagram bounced (e.g. the engine had just closed).
-        public static void IgnoreUdpResets(UdpClient u) { u.Client.IOControl(-1744830452, new byte[4], null); }
+        public static void IgnoreUdpResets(UdpClient u)
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Unix) u.Client.IOControl(-1744830452, new byte[4], null);
+        }
 
         public void Start()
         {
@@ -1132,6 +1206,15 @@ namespace ZkDirect
 
         static void KillWithUs(Process p)
         {
+            if (Environment.OSVersion.Platform == PlatformID.Unix)
+            {
+                // no job objects: a watchdog ends cloudflared once this process is gone (e.g. its terminal was closed)
+                var watch = new ProcessStartInfo("/bin/sh", "-c \"while kill -0 " + Process.GetCurrentProcess().Id + " && kill -0 " + p.Id +
+                    "; do sleep 1; done 2>/dev/null; kill -9 " + p.Id + " 2>/dev/null\"");
+                watch.UseShellExecute = false;
+                Process.Start(watch);
+                return;
+            }
             lock (typeof(Cloudflared))
             {
                 if (job == IntPtr.Zero)
@@ -1153,19 +1236,22 @@ function Initialize-Bridge {
 }
 
 # cloudflared.exe from -Cloudflared, the last one used, PATH, next to this script, its installer's folder or Downloads.
+# On Linux the download is cloudflared-linux-amd64 (no extension), or a package that puts cloudflared on PATH.
 function Find-Cloudflared {
+    $files = { param($dir) Get-ChildItem $dir -Filter $(if ($onLinux) { 'cloudflared*' } else { 'cloudflared*.exe' }) -File -ErrorAction SilentlyContinue |
+        Where-Object { -not $onLinux -or -not $_.Extension } }  # not a .deb, .rpm or .exe lying next to it
     $candidates = @(
         $Cloudflared
         Get-SavedSetting $cloudflaredFile
-        (Get-Command cloudflared -ErrorAction SilentlyContinue | Select-Object -First 1).Source
-        Get-ChildItem $scriptDir -Filter 'cloudflared*.exe' -ErrorAction SilentlyContinue | ForEach-Object FullName
+        (Get-Command cloudflared -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        & $files $scriptDir | ForEach-Object FullName
         foreach ($pf in ${env:ProgramFiles(x86)}, $env:ProgramFiles) { if ($pf) { Join-Path $pf 'cloudflared\cloudflared.exe' } }
-        Get-ChildItem (Join-Path $env:USERPROFILE 'Downloads') -Filter 'cloudflared*.exe' -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | ForEach-Object FullName
+        & $files (Join-Path $HOME 'Downloads') | Sort-Object LastWriteTime -Descending | ForEach-Object FullName
     )
     foreach ($c in $candidates) {
         if ($c -and (Test-Path $c -PathType Leaf)) {
             $c = (Resolve-Path $c).Path
+            if ($onLinux) { try { & chmod +x $c 2>$null } catch {} }  # downloads aren't executable
             Save-Setting $cloudflaredFile $c
             return $c
         }
@@ -1196,8 +1282,15 @@ function Step-Tunnel {
     if (-not $t.Url -and $t.Proc.Url -and (Get-Date) -ge $t.NextCheck) {
         $t.NextCheck = (Get-Date).AddSeconds(1)
         $resolves = $true
+        $tunnelHost = ([Uri]$t.Proc.Url).Host
         if (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue) {
-            try { [void](Resolve-DnsName ([Uri]$t.Proc.Url).Host -Server 1.1.1.1 -DnsOnly -QuickTimeout -ErrorAction Stop) } catch { $resolves = $false }
+            try { [void](Resolve-DnsName $tunnelHost -Server 1.1.1.1 -DnsOnly -QuickTimeout -ErrorAction Stop) } catch { $resolves = $false }
+        } else {
+            # Linux: the same resolver over HTTPS
+            try {
+                $r = Invoke-RestMethod "https://cloudflare-dns.com/dns-query?type=A&name=$tunnelHost" -Headers @{ Accept = 'application/dns-json' } -TimeoutSec 3
+                $resolves = $r.Status -eq 0 -and @($r.Answer).Count -gt 0
+            } catch { $resolves = $false }
         }
         if ($resolves -or (Get-Date) -gt $t.Deadline) {
             $t.Url = $t.Proc.Url
@@ -1227,11 +1320,18 @@ function Test-Tunneled($conn) {
     $script:tunnel -and [Net.IPAddress]::IsLoopback($ep.Address) -and [ZkDirect.TunnelHost]::IsTunneled($ep.Port)
 }
 
+# This PC's IPv4 addresses (Get-NetIPAddress is Windows-only).
+function Get-LanAddresses {
+    if (-not $onLinux) { return Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object IPAddress }
+    [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object OperationalStatus -eq 'Up' |
+        ForEach-Object { $_.GetIPProperties().UnicastAddresses } | Where-Object { $_.Address.AddressFamily -eq 'InterNetwork' } |
+        ForEach-Object { $_.Address.ToString() }
+}
+
 function Show-JoinInfo {
     $ips = @()
     try {
-        $ips = Get-NetIPAddress -AddressFamily IPv4 |
-            Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | ForEach-Object IPAddress
+        $ips = Get-LanAddresses | Where-Object { $_ -notlike '127.*' -and $_ -notlike '169.254.*' }
     } catch {}
     $public = $null
     try { $public = (Invoke-RestMethod 'https://api.ipify.org' -TimeoutSec 3).ToString().Trim() } catch {}
@@ -1249,10 +1349,10 @@ function Show-JoinInfo {
     foreach ($ip in $ips) { Say "    ${ip}:$Port" Green }
     if ($script:tunnel) { Say "    or the Cloudflare tunnel's address, coming up below" Green }
     elseif (-not $forwarded -and -not $NoTunnel) {
-        Say "  No way to open the port (e.g. phone tethering)? Download cloudflared-windows-amd64.exe from" Yellow
+        Say "  No way to open the port (e.g. phone tethering)? Download cloudflared-$(if ($onLinux) { 'linux-amd64' } else { 'windows-amd64.exe' }) from" Yellow
         Say "  https://github.com/cloudflare/cloudflared/releases and host again: players then join through a Cloudflare tunnel." Yellow
     }
-    Say "  (or 'zk-direct.cmd join <address>' in a terminal, or a zkjoinbk://<address> link). Type /help for commands." Green
+    Say "  (or 'zk-direct.cmd join <address>' in a terminal, './zk-direct.sh join <address>' on Linux, or a zkjoinbk://<address> link). Type /help for commands." Green
     $script:hostAddress = if ($public) { "${public}:$Port" } elseif (@($ips).Count) { "$(@($ips)[0]):$Port" }  # for the window's invite link
 }
 
@@ -1395,8 +1495,7 @@ function Open-Join([string]$address) {
 # pr-downloader in the background, so the lobby keeps running while it works.
 function Start-Download($j, [string]$kind, [string]$what) {
     Say "Downloading $kind '$what'..." Yellow
-    $p = Start-Process -PassThru -WindowStyle Hidden -FilePath (Join-Path $script:EngineDir 'pr-downloader.exe') `
-        -ArgumentList '--filesystem-writepath', "`"$ZkDir`"", "--download-$kind", "`"$what`""
+    $p = Start-EngineProgram 'pr-downloader' '--filesystem-writepath', "`"$ZkDir`"", "--download-$kind", "`"$what`"" -Hidden
     [void]$p.Handle  # keeps ExitCode readable after it exits
     $j.Downloads.Add([pscustomobject]@{ Proc = $p; Kind = $kind; What = $what })
 }
@@ -1438,8 +1537,8 @@ function Step-Join($j) {
             'STATE' {
                 $s = $msg.Data
                 $engineDir = Get-EngineDir $s.Engine
-                if (-not (Test-Path (Join-Path $engineDir 'spring.exe'))) {
-                    Say "The host uses engine $($s.Engine), which isn't in $ZkDir\engine\win64. Start Zero-K normally once so it downloads, or copy that folder from the host." Red
+                if (-not (Test-Path (Get-EngineExe 'spring' $engineDir))) {
+                    Say "The host uses engine $($s.Engine), which isn't in $(Join-Path $ZkDir $engineSubdir). Start Zero-K normally once so it downloads, or copy that folder from the host." Red
                     $j.Done = $true
                     return
                 }
@@ -1517,7 +1616,7 @@ function Step-Join($j) {
         [void]$j.Downloads.Remove($d)
         $ok = $d.Proc.ExitCode -eq 0
         if ($ok) { Say "Downloaded $($d.Kind) '$($d.What)'." Green }
-        elseif ($d.Kind -eq 'map') { Say "Couldn't download map '$($d.What)' (not on springfiles, or it's down). You'll stay in the lobby when the game starts; get the map into $ZkDir\maps and rejoin to play." Red }
+        elseif ($d.Kind -eq 'map') { Say "Couldn't download map '$($d.What)' (not on springfiles, or it's down). You'll stay in the lobby when the game starts; get the map into $(Join-Path $ZkDir 'maps') and rejoin to play." Red }
         else { Say "Couldn't download $($d.Kind) '$($d.What)'. Get it manually or the game will fail to load." Red }
         if ($d.Kind -eq 'map') {
             if ($ok) { $j.Received[$d.What] = $true }
@@ -2143,6 +2242,16 @@ function Start-Gui {
 
 # ---------------------------------------------------------------- main
 
+if ($onLinux) {
+    # no window or zkjoinbk:// links on Linux; a link's address still works as the join address
+    if ($Mode -match '^zkjoin(bk)?://') { $Address = $Mode; $Mode = 'join' }
+    if ($Mode -in 'gui', 'install') { Write-Host "On Linux, zk-direct runs in the terminal only: ./zk-direct.sh join <address>, or ./zk-direct.sh host." -ForegroundColor Red; return }
+    if (-not $Mode) {
+        Write-Host "Joining a game (to host one instead: ./zk-direct.sh host)." -ForegroundColor DarkGray
+        $Mode = 'join'
+    }
+}
+
 if ($Mode -eq 'install') {
     Register-JoinLinks
     Remove-OldJoinLinks
@@ -2171,11 +2280,11 @@ try {
     Save-Setting $nameFile $Name
 
     $script:EngineDir = Get-EngineDir $Engine
-    if (-not (Test-Path (Join-Path $script:EngineDir 'spring.exe'))) { throw "No spring.exe in '$($script:EngineDir)'." }
+    if (-not $script:EngineDir -or -not (Test-Path (Get-EngineExe 'spring'))) { throw "No spring$exeSuffix in '$(if ($script:EngineDir) { $script:EngineDir } else { Join-Path $ZkDir $engineSubdir })'." }
 
     if ($Mode -eq 'host') { Start-Host } else { Start-Join }
 } catch {
     Write-Host $_.Exception.Message -ForegroundColor Red
     Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
-    if (-not $env:ZK_DIRECT_NOPAUSE) { Read-Host 'Press Enter to close' | Out-Null }
+    if (-not $env:ZK_DIRECT_NOPAUSE -and -not $onLinux) { Read-Host 'Press Enter to close' | Out-Null }  # a double-clicked window would vanish
 }

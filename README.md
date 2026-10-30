@@ -1,8 +1,8 @@
 # zk-backup
 
-Play Zero-K multiplayer by direct IP while the official servers are down. Windows only; needs Zero-K installed (Steam or standalone).
+Play Zero-K multiplayer by direct IP while the official servers are down. Needs Zero-K installed (Steam or standalone). On Windows there's a window; on [Linux](#linux) it runs in the terminal.
 
-Download the zip from the Releases page and extract it anywhere. It includes engine `2026.07.04` and Zero-K `v1.14.10.3`, which are copied into your install if it doesn't have them.
+Download `zk-direct-...-windows.zip` (or `-linux.tar.gz`) from the Releases page and extract it anywhere. It includes Zero-K `v1.14.10.3`, and on Windows engine `2026.07.04`, which are copied into your install if it doesn't have them.
 
 ## Join a game
 
@@ -42,6 +42,23 @@ zk-direct.cmd host -Name YourName
 
 Anything that isn't a command is chat. Players can use `/spec`, `/play` and `/team <n>` on themselves. Players missing the map get it automatically, and `/start` waits until they have it.
 
+## Linux
+
+zk-direct uses the Zero-K folder that `Zero-K.exe` (run with Mono) sets up, with its Linux engine. It runs in the terminal with PowerShell 7:
+
+```
+tar xzf zk-direct-*-linux.tar.gz && cd zk-direct
+./zk-direct.sh join <address> -Name YourName
+./zk-direct.sh host -Name YourName
+```
+
+- Without PowerShell 7 (`pwsh`), the script offers to download it into `~/.local/share/zk-direct` (no root needed). Or install it from your package manager.
+- The Zero-K folder is looked for in Steam's libraries, your home folder, `~/Downloads` and `~/Games`, or asked for. `-ZkPath` or `ZK_DIR` sets it. Settings are kept in `~/.config/zk-direct`.
+- Linux and Windows players can play together, as long as everyone has the host's engine version: start Zero-K once to update it.
+- Hosting: UPnP needs `upnpc` (the `miniupnpc` package). For a Cloudflare tunnel, put `cloudflared` on your PATH, or download `cloudflared-linux-amd64` next to `zk-direct.sh` or into `~/Downloads`.
+- The game's console output goes to `~/.config/zk-direct/spring.log` rather than over the lobby.
+- There's no window and no `zkjoinbk://` links, but `./zk-direct.sh join zkjoinbk://...` takes a link's address.
+
 ## Options
 
 - `-ZkPath "D:\Games\Zero-K"`: your Zero-K folder for terminal use. Without it, the folder from setup is used, or one is found automatically. Change it in the window under **Settings...**.
@@ -52,5 +69,5 @@ Anything that isn't a command is chat. Players can use `/spec`, `/play` and `/te
 
 ```
 bundle\make-bundle.ps1 -ZkPath <a Zero-K install with the new version> [-Engine 2026.07.04] [-Game zk:stable]
-.\make-release.ps1    # writes dist\zk-direct-<game>.zip for the Releases page
+.\make-release.ps1    # writes dist\zk-direct-<game>-windows.zip and -linux.tar.gz (no engine) for the Releases page
 ```
