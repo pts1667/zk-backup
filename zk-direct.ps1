@@ -7,16 +7,19 @@ The host runs a tiny text lobby (TCP) where players gather, chat and pick teams.
 When the host types /start, everyone's engine is launched with a generated script
 and connects straight to the host's game (UDP, same port number).
 
+  Join:    zk-direct.cmd                      (no arguments: a window for joining)
+           zk-direct.cmd join 203.0.113.5 -Name Bob   (the same in the terminal)
   Host:    zk-direct.cmd host -Name Tom [-Map "TitanDuel 2.2"] [-Port 8452]
-  Join:    zk-direct.cmd join 203.0.113.5 -Name Bob
-  Link:    zk-direct.cmd install   (once; then zkjoin://203.0.113.5:8452 links open the join flow)
+  Link:    zk-direct.cmd install   (once; then zkjoin://203.0.113.5:8452 links open the join window)
 
 The host must be reachable on -Port over BOTH TCP and UDP: forward it on the router,
 or have everyone join the same VPN (Tailscale, ZeroTier, Radmin VPN) and use that IP.
 
 The Zero-K folder (the one containing engine\) is found from, in order: -ZkDir (alias -ZkPath),
-the ZK_DIR environment variable, the last folder used, this script's folder, Steam libraries;
-otherwise you're asked once. The choice is remembered in %LOCALAPPDATA%\zk-direct.
+the ZK_DIR environment variable, the last folder used, this script's folder, Steam libraries,
+common install places; the window asks to confirm it once, the terminal only asks if none is found.
+The choice and your name are remembered in %LOCALAPPDATA%\zk-direct. Your name defaults to
+the one you log in to Zero-K with.
 #>
 param(
     [Parameter(Position = 0)][string]$Mode,
@@ -31,10 +34,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scriptPath = $MyInvocation.MyCommand.Path
+$scriptDir = Split-Path -Parent $scriptPath
 $configDir = Join-Path $env:LOCALAPPDATA 'zk-direct'
 $nameFile = Join-Path $configDir 'name.txt'
 $zkDirFile = Join-Path $configDir 'zkdir.txt'
+$addressFile = Join-Path $configDir 'address.txt'
+$namePattern = '^[A-Za-z0-9_\-\[\]]{1,30}$'
+$ui = $null  # the join window's controls, when it's open
 $bundleDir = Join-Path $scriptDir 'bundle'
 $aiDifficulties = 'Beginner', 'Novice', 'Easy', 'Normal', 'Hard', 'Brutal'
 
@@ -52,25 +59,57 @@ function Get-SteamZkDirs {
     $libraries | ForEach-Object { [IO.Path]::Combine($_, 'steamapps', 'common', 'Zero-K') }
 }
 
+function Get-SavedSetting([string]$file) {
+    if (Test-Path $file) { (Get-Content $file -Raw).Trim() }
+}
+
+function Save-Setting([string]$file, [string]$value) {
+    [void](New-Item $configDir -ItemType Directory -Force)
+    [IO.File]::WriteAllText($file, $value, $utf8)
+}
+
+# Lazily, so later (slower) places are only searched when the earlier ones have nothing.
+function Get-ZkDirCandidates {
+    $ZkDir
+    $env:ZK_DIR
+    Get-SavedSetting $zkDirFile
+    $scriptDir
+    Split-Path $scriptDir
+    Get-SteamZkDirs
+    foreach ($root in ${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA) { if ($root) { Join-Path $root 'Zero-K' } }
+    # standalone installs are often unzipped somewhere like Downloads\zero-k-portable
+    foreach ($parent in (Join-Path $env:USERPROFILE 'Downloads'), [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('MyDocuments'), 'C:\Games') {
+        if ($parent -and (Test-Path $parent)) { Get-ChildItem $parent -Directory -ErrorAction SilentlyContinue | ForEach-Object FullName }
+    }
+}
+
+function Get-DefaultZkDir {
+    $found = Get-ZkDirCandidates | Where-Object { Test-ZkDir $_ } | Select-Object -First 1
+    if ($found) { (Resolve-Path $found).Path }
+}
+
 function Find-ZkDir {
-    $candidates = @($ZkDir, $env:ZK_DIR)
-    if (Test-Path $zkDirFile) { $candidates += (Get-Content $zkDirFile -Raw).Trim() }
-    $candidates += $scriptDir
-    $candidates += Get-SteamZkDirs
-    $found = $candidates | Where-Object { Test-ZkDir $_ } | Select-Object -First 1
-    if ($ZkDir -and $found -ne $ZkDir) { throw "'$ZkDir' isn't a Zero-K folder (no engine\win64 inside)." }
+    if ($ZkDir -and -not (Test-ZkDir $ZkDir)) { throw "'$ZkDir' isn't a Zero-K folder (no engine\win64 inside)." }
+    $found = Get-DefaultZkDir
     while (-not $found) {
         $answer = (Read-Host 'Path to your Zero-K folder (the one containing engine\)').Trim('" ')
-        if (Test-ZkDir $answer) { $found = $answer } else { Write-Host "No engine\win64 in '$answer'." -ForegroundColor Red }
+        if (Test-ZkDir $answer) { $found = (Resolve-Path $answer).Path } else { Write-Host "No engine\win64 in '$answer'." -ForegroundColor Red }
     }
-    $found = (Resolve-Path $found).Path
-    [void](New-Item $configDir -ItemType Directory -Force)
-    [IO.File]::WriteAllText($zkDirFile, $found, $utf8)
+    Save-Setting $zkDirFile $found
     $found
 }
 
-function Get-EngineDir([string]$version) {
-    $root = Join-Path $ZkDir 'engine\win64'
+# The name you log in to Zero-K with, from the lobby's saved settings (LuaMenu\Config\<lobby>_data.lua).
+function Get-ZkLoginName([string]$dir) {
+    if (-not (Test-ZkDir $dir)) { return }
+    foreach ($file in Get-ChildItem ([IO.Path]::Combine($dir, 'LuaMenu', 'Config')) -Filter '*_data.lua' -ErrorAction SilentlyContinue) {
+        $m = Select-String -LiteralPath $file.FullName -Pattern '^\s*userName = "(.+)",\s*$' | Select-Object -First 1
+        if ($m -and $m.Matches[0].Groups[1].Value -match $namePattern) { return $m.Matches[0].Groups[1].Value }
+    }
+}
+
+function Get-EngineDir([string]$version, [string]$dir = $ZkDir) {
+    $root = Join-Path $dir 'engine\win64'
     if ($version) { return Join-Path $root $version }
     $dirs = Get-ChildItem $root -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'spring.exe') }
     ($dirs | Sort-Object { [version]($_.Name -replace '[^\d.].*$', '') } | Select-Object -Last 1).FullName
@@ -98,7 +137,7 @@ function Get-Bundle {
 
 function Get-BundleFile([string]$name) {
     $path = Join-Path $bundleDir $name
-    if (-not (Test-Path $path)) { Write-Host "No bundle\$name; download it from the repo's Releases page into bundle\ to have it installed." -ForegroundColor Yellow; return }
+    if (-not (Test-Path $path)) { Write-Note "No bundle\$name; download it from the repo's Releases page into bundle\ to have it installed."; return }
     $path
 }
 
@@ -110,7 +149,7 @@ function Install-Bundle {
     if (-not (Test-Path (Join-Path $engineDir 'spring.exe'))) {
         $zip = Get-BundleFile $bundle.EngineZip
         if ($zip) {
-            Write-Host "Installing bundled engine $($bundle.Engine)..." -ForegroundColor Yellow
+            Write-Note "Installing bundled engine $($bundle.Engine)..."
             Add-Type -AssemblyName System.IO.Compression.FileSystem
             [IO.Compression.ZipFile]::ExtractToDirectory($zip, $engineDir)
         }
@@ -118,7 +157,7 @@ function Install-Bundle {
     if (-not (Test-GameInstalled $bundle.Game)) {
         $archive = Get-BundleFile $bundle.GameArchive
         if ($archive) {
-            Write-Host "Installing bundled $($bundle.Game)..." -ForegroundColor Yellow
+            Write-Note "Installing bundled $($bundle.Game) (this can take a minute)..."
             [void](New-Item (Join-Path $ZkDir 'games') -ItemType Directory -Force)
             Copy-Item $archive (Join-Path $ZkDir 'games')
         }
@@ -204,11 +243,17 @@ function Show-Prompt {
 }
 
 function Say([string]$msg, [string]$color = 'Gray') {
+    if ($script:ui) { Write-GuiLog $msg $color; return }
     $width = 80
     try { $width = [Console]::WindowWidth } catch {}
     [Console]::Write("`r" + (' ' * ($width - 1)) + "`r")
     Write-Host $msg -ForegroundColor $color
     Show-Prompt
+}
+
+# For setup messages, before there's a lobby prompt to keep at the bottom.
+function Write-Note([string]$msg) {
+    if ($script:ui) { Write-GuiLog $msg 'Yellow' } else { Write-Host $msg -ForegroundColor Yellow }
 }
 
 # Non-blocking line editor, so the lobby keeps polling sockets while you type.
@@ -238,6 +283,7 @@ function Format-Player($p) {
 }
 
 function Show-Lobby($state) {
+    if ($script:ui) { Update-GuiLobby $state; return }
     Say "--- $($state.Game) on $($state.Map)  (engine $($state.Engine))" Cyan
     $teams = @($state.Players | ForEach-Object Team) + @($state.Bots | ForEach-Object Team) | Where-Object { $_ -gt 0 } | Sort-Object -Unique
     foreach ($t in $teams) {
@@ -532,10 +578,10 @@ function Show-JoinInfo {
     } catch {}
     $public = $null
     try { $public = (Invoke-RestMethod 'https://api.ipify.org' -TimeoutSec 3).ToString().Trim() } catch {}
-    Say "Lobby open on TCP+UDP port $Port. Friends join with one of:" Green
-    if ($public) { Say "    zk-direct.cmd join ${public}:$Port      (internet: needs port $Port TCP+UDP forwarded to this PC)" Green }
-    foreach ($ip in $ips) { Say "    zk-direct.cmd join ${ip}:$Port" Green }
-    Say "  or a zkjoin://<ip>:$Port link if they ran 'zk-direct.cmd install'. Type /help for commands." Green
+    Say "Lobby open on TCP+UDP port $Port. Friends double-click zk-direct.cmd and join one of:" Green
+    if ($public) { Say "    ${public}:$Port      (internet: needs port $Port TCP+UDP forwarded to this PC)" Green }
+    foreach ($ip in $ips) { Say "    ${ip}:$Port" Green }
+    Say "  (or 'zk-direct.cmd join <address>' in a terminal, or a zkjoin://<address> link). Type /help for commands." Green
 }
 
 function Start-Host {
@@ -563,7 +609,7 @@ function Start-Host {
                 foreach ($msg in @(Receive-Msgs $c)) {
                     if ($msg.Type -eq 'HELLO' -and -not $c.Player) {
                         $n = [string]$msg.Data.Name
-                        if ($n -notmatch '^[A-Za-z0-9_\-\[\]]{1,30}$') { Send-Msg $c 'ERROR' @{ Text = "Invalid name '$n' (letters, digits, _ - [ ] only)." }; $c.Dead = $true }
+                        if ($n -notmatch $namePattern) { Send-Msg $c 'ERROR' @{ Text = "Invalid name '$n' (letters, digits, _ - [ ] only)." }; $c.Dead = $true }
                         elseif (Find-Member $n) { Send-Msg $c 'ERROR' @{ Text = "The name '$n' is taken." }; $c.Dead = $true }
                         else {
                             $c.Player = [pscustomobject]@{ Name = $n; Team = (Get-DefaultTeam); Password = (New-Password); InGame = $false; Downloading = $false }
@@ -609,106 +655,496 @@ function Start-Host {
 
 # ---------------------------------------------------------------- join
 
-function Start-Join {
-    $addr = $Address -replace '^zkjoin://', '' -replace '/+$', ''
+# A join session; Step-Join advances it without blocking, from the terminal loop or the window's timer.
+function Open-Join([string]$address) {
+    $addr = $address.Trim() -replace '^zkjoin://', '' -replace '/+$', ''
     $hostName = $addr
     $hostPort = $Port
     if ($addr -match '^(.+):(\d+)$') { $hostName = $Matches[1]; $hostPort = [int]$Matches[2] }
-
     Say "Connecting to ${hostName}:$hostPort..." Yellow
     $tcp = New-Object Net.Sockets.TcpClient
-    if (-not $tcp.ConnectAsync($hostName, $hostPort).Wait(10000)) { throw "Couldn't reach the lobby at ${hostName}:$hostPort." }
-    $conn = New-Conn $tcp
-    Send-Msg $conn 'HELLO' @{ Name = $Name }
-    $have = @{ Game = $null; Map = $null }
-    $received = @{}  # maps received this session; the engine's cache doesn't know them until it rescans
-    $dl = $null
-    $game = $null
-    try {
-        while ($true) {
-            foreach ($msg in @(Receive-Msgs $conn)) {
-                switch ($msg.Type) {
-                    'ERROR' { Say $msg.Data.Text Red; return }
-                    'INFO' { Say $msg.Data.Text Yellow }
-                    'CHAT' { Say "<$($msg.Data.From)> $($msg.Data.Text)" }
-                    'STATE' {
-                        $s = $msg.Data
-                        $engineDir = Get-EngineDir $s.Engine
-                        if (-not (Test-Path (Join-Path $engineDir 'spring.exe'))) {
-                            Say "The host uses engine $($s.Engine), which isn't in $ZkDir\engine\win64. Start Zero-K normally once so it downloads, or copy that folder from the host." Red
-                            return
-                        }
-                        $script:EngineDir = $engineDir
-                        Show-Lobby $s
-                        if ($have.Game -ne $s.Game) {
-                            if (-not (Test-GameInstalled $s.Game)) { Invoke-Download 'game' $s.Game }
-                            $have.Game = $s.Game
-                        }
-                        if ($have.Map -ne $s.Map) {
-                            $have.Map = $s.Map
-                            if (-not $received[$s.Map] -and -not (Test-MapInstalled $s.Map)) {
-                                Say "You don't have $($s.Map); asking the host for it..." Yellow
-                                Send-Msg $conn 'NEEDMAP' @{ Map = $s.Map }
-                            }
-                        }
-                    }
-                    'MAPFILE' {
-                        $file = [IO.Path]::GetFileName([string]$msg.Data.File)  # never trust a path from the network
-                        if ($file -notmatch '\.(sd7|sdz)$') { Say "Host offered a non-map file '$file'; ignoring." Red; continue }
-                        $final = Join-Path $ZkDir "maps\$file"
-                        $dl = [pscustomobject]@{ Map = $msg.Data.Map; Final = $final; Part = "$final.part"; Size = [long]$msg.Data.Size; Got = 0L; NextPct = 10
-                            File = [IO.File]::Create("$final.part") }
-                        Say "Receiving $($dl.Map) ($([Math]::Ceiling($dl.Size / 1MB)) MB)..." Yellow
-                    }
-                    'CHUNK' {
-                        if (-not $dl) { continue }
-                        $bytes = [Convert]::FromBase64String($msg.Data)
-                        $dl.File.Write($bytes, 0, $bytes.Length)
-                        $dl.Got += $bytes.Length
-                        if ($dl.Size -and $dl.Got * 100 / $dl.Size -ge $dl.NextPct) { Say "  $($dl.NextPct)%" DarkGray; $dl.NextPct += 10 }
-                    }
-                    'MAPDONE' {
-                        if (-not $dl) { continue }
-                        $dl.File.Dispose()
-                        if ($dl.Got -eq $dl.Size) {
-                            Move-Item $dl.Part $dl.Final -Force
-                            $received[$dl.Map] = $true
-                            Say "Got $($dl.Map)." Green
-                        } else {
-                            Remove-Item $dl.Part -ErrorAction SilentlyContinue
-                            Say "Map transfer was incomplete ($($dl.Got) of $($dl.Size) bytes)." Red
-                        }
-                        $dl = $null
-                    }
-                    'MAPABORT' {
-                        if ($dl) { $dl.File.Dispose(); Remove-Item $dl.Part -ErrorAction SilentlyContinue; $dl = $null }
-                    }
-                    'NOMAP' {
-                        Say "The host can't send $($msg.Data.Map) either; trying to download it." Yellow
-                        Invoke-Download 'map' $msg.Data.Map
-                    }
-                    'START' {
-                        Say "Host started the game, launching..." Green
-                        $game = Start-Spring ("[GAME]`r`n{`r`n  HostIP=$hostName;`r`n  HostPort=$($msg.Data.Port);`r`n  IsHost=0;`r`n" +
-                            "  MyPlayerName=$Name;`r`n  MyPasswd=$($msg.Data.Password);`r`n}")
+    [pscustomobject]@{
+        HostName = $hostName; HostPort = $hostPort; Tcp = $tcp; Conn = $null; Done = $false
+        Connecting = $tcp.ConnectAsync($hostName, $hostPort); Deadline = (Get-Date).AddSeconds(10)
+        State = $null; HaveGame = $null; HaveMap = $null
+        Received = @{}  # maps received this session; the engine's cache doesn't know them until it rescans
+        Dl = $null; Game = $null; Downloads = [Collections.Generic.List[object]]::new()
+    }
+}
+
+# pr-downloader in the background, so the lobby keeps running while it works.
+function Start-Download($j, [string]$kind, [string]$what) {
+    Say "Downloading $kind '$what'..." Yellow
+    $p = Start-Process -PassThru -WindowStyle Hidden -FilePath (Join-Path $script:EngineDir 'pr-downloader.exe') `
+        -ArgumentList '--filesystem-writepath', "`"$ZkDir`"", "--download-$kind", "`"$what`""
+    [void]$p.Handle  # keeps ExitCode readable after it exits
+    $j.Downloads.Add([pscustomobject]@{ Proc = $p; Kind = $kind; What = $what })
+}
+
+function Step-Join($j) {
+    if ($j.Done) { return }
+    if (-not $j.Conn) {
+        if ($j.Connecting.IsCompleted -and $j.Tcp.Connected) {
+            $j.Conn = New-Conn $j.Tcp
+            Send-Msg $j.Conn 'HELLO' @{ Name = $Name }
+        } elseif ($j.Connecting.IsCompleted -or (Get-Date) -gt $j.Deadline) {
+            Say "Couldn't reach the lobby at $($j.HostName):$($j.HostPort). Check the address, and that the host's port is open." Red
+            $j.Done = $true
+        }
+        return
+    }
+    foreach ($msg in @(Receive-Msgs $j.Conn)) {
+        switch ($msg.Type) {
+            'ERROR' { Say $msg.Data.Text Red; $j.Done = $true; return }
+            'INFO' { Say $msg.Data.Text Yellow }
+            'CHAT' { Say "<$($msg.Data.From)> $($msg.Data.Text)" }
+            'STATE' {
+                $s = $msg.Data
+                $engineDir = Get-EngineDir $s.Engine
+                if (-not (Test-Path (Join-Path $engineDir 'spring.exe'))) {
+                    Say "The host uses engine $($s.Engine), which isn't in $ZkDir\engine\win64. Start Zero-K normally once so it downloads, or copy that folder from the host." Red
+                    $j.Done = $true
+                    return
+                }
+                $script:EngineDir = $engineDir
+                $j.State = $s
+                Show-Lobby $s
+                if ($j.HaveGame -ne $s.Game) {
+                    if (-not (Test-GameInstalled $s.Game)) { Start-Download $j 'game' $s.Game }
+                    $j.HaveGame = $s.Game
+                }
+                if ($j.HaveMap -ne $s.Map) {
+                    $j.HaveMap = $s.Map
+                    if (-not $j.Received[$s.Map] -and -not (Test-MapInstalled $s.Map)) {
+                        Say "You don't have $($s.Map); asking the host for it..." Yellow
+                        Send-Msg $j.Conn 'NEEDMAP' @{ Map = $s.Map }
                     }
                 }
             }
-            if ($conn.Dead) { Say "The host closed the lobby." Red; return }
-            if ($game -and $game.HasExited) {
-                $game = $null
-                Send-Msg $conn 'BACK' $null
-                Say "Back in the lobby." Green
+            'MAPFILE' {
+                $file = [IO.Path]::GetFileName([string]$msg.Data.File)  # never trust a path from the network
+                if ($file -notmatch '\.(sd7|sdz)$') { Say "Host offered a non-map file '$file'; ignoring." Red; continue }
+                $final = Join-Path $ZkDir "maps\$file"
+                $j.Dl = [pscustomobject]@{ Map = $msg.Data.Map; Final = $final; Part = "$final.part"; Size = [long]$msg.Data.Size; Got = 0L; NextPct = 10
+                    File = [IO.File]::Create("$final.part") }
+                Say "Receiving $($j.Dl.Map) ($([Math]::Ceiling($j.Dl.Size / 1MB)) MB)..." Yellow
             }
+            'CHUNK' {
+                $dl = $j.Dl
+                if (-not $dl) { continue }
+                $bytes = [Convert]::FromBase64String($msg.Data)
+                $dl.File.Write($bytes, 0, $bytes.Length)
+                $dl.Got += $bytes.Length
+                # the window shows a progress bar instead
+                if (-not $script:ui -and $dl.Size -and $dl.Got * 100 / $dl.Size -ge $dl.NextPct) { Say "  $($dl.NextPct)%" DarkGray; $dl.NextPct += 10 }
+            }
+            'MAPDONE' {
+                $dl = $j.Dl
+                if (-not $dl) { continue }
+                $dl.File.Dispose()
+                if ($dl.Got -eq $dl.Size) {
+                    Move-Item $dl.Part $dl.Final -Force
+                    $j.Received[$dl.Map] = $true
+                    Say "Got $($dl.Map)." Green
+                } else {
+                    Remove-Item $dl.Part -ErrorAction SilentlyContinue
+                    Say "Map transfer was incomplete ($($dl.Got) of $($dl.Size) bytes)." Red
+                }
+                $j.Dl = $null
+            }
+            'MAPABORT' { Stop-JoinMapDownload $j }
+            'NOMAP' {
+                Say "The host can't send $($msg.Data.Map) either; trying to download it." Yellow
+                Start-Download $j 'map' $msg.Data.Map
+            }
+            'START' {
+                foreach ($d in $j.Downloads) { Say "Still downloading $($d.Kind) '$($d.What)'; the game may fail to load." Red }
+                Say "Host started the game, launching..." Green
+                $j.Game = Start-Spring ("[GAME]`r`n{`r`n  HostIP=$($j.HostName);`r`n  HostPort=$($msg.Data.Port);`r`n  IsHost=0;`r`n" +
+                    "  MyPlayerName=$Name;`r`n  MyPasswd=$($msg.Data.Password);`r`n}")
+            }
+        }
+    }
+    foreach ($d in @($j.Downloads)) {
+        if (-not $d.Proc.HasExited) { continue }
+        [void]$j.Downloads.Remove($d)
+        if ($d.Proc.ExitCode -eq 0) { Say "Downloaded $($d.Kind) '$($d.What)'." Green }
+        else { Say "Couldn't download $($d.Kind) '$($d.What)'. Get it manually or the game will fail to load." Red }
+    }
+    if ($j.Conn.Dead) { Say "The host closed the lobby." Red; $j.Done = $true; return }
+    if ($j.Game -and $j.Game.HasExited) {
+        $j.Game = $null
+        Send-Msg $j.Conn 'BACK' $null
+        Say "Back in the lobby." Green
+    }
+}
+
+function Send-JoinChat($j, [string]$line) {
+    if ($j.Conn -and -not $j.Done) { Send-Msg $j.Conn 'CHAT' @{ Text = $line } }
+}
+
+function Stop-JoinMapDownload($j) {
+    if (-not $j.Dl) { return }
+    $j.Dl.File.Dispose()
+    Remove-Item $j.Dl.Part -ErrorAction SilentlyContinue
+    $j.Dl = $null
+}
+
+function Close-Join($j) {
+    Stop-JoinMapDownload $j
+    $j.Tcp.Close()
+    $j.Done = $true
+}
+
+function Start-Join {
+    $j = Open-Join $Address
+    try {
+        while (-not $j.Done) {
+            Step-Join $j
             $line = Read-InputLine
             if ($line -eq '/quit') { return }
-            if ($line) { Send-Msg $conn 'CHAT' @{ Text = $line } }
+            if ($line) { Send-JoinChat $j $line }
             Start-Sleep -Milliseconds 50
         }
-    } finally {
-        if ($dl) { $dl.File.Dispose(); Remove-Item $dl.Part -ErrorAction SilentlyContinue }
-        $tcp.Close()
+    } finally { Close-Join $j }
+}
+
+# ---------------------------------------------------------------- join window (hosting stays in the terminal)
+
+$guiColors = @{ Gray = 'Black'; Yellow = 'DarkGoldenrod'; Green = 'ForestGreen'; Red = 'Firebrick'; Cyan = 'Teal'; DarkGray = 'Gray' }
+
+function Initialize-Gui {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    Add-Type -Namespace ZkDirect -Name Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
+    [void][ZkDirect.Native]::SetProcessDPIAware()  # crisp text on scaled displays; sizes below go through px
+    [Windows.Forms.Application]::EnableVisualStyles()
+    $g = [Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
+    $script:dpiScale = $g.DpiX / 96
+    $g.Dispose()
+    $script:uiFont = New-Object Drawing.Font('Segoe UI', 9)
+}
+
+function px([double]$n) { [int]($n * $script:dpiScale) }
+
+function New-Control([string]$type, [hashtable]$props = @{}) {
+    $c = New-Object "Windows.Forms.$type"
+    foreach ($k in $props.Keys) { $c.$k = $props[$k] }
+    $c
+}
+
+function New-Grid([int]$columns) {
+    New-Control TableLayoutPanel @{ ColumnCount = $columns; AutoSize = $true; Dock = 'Fill'; Margin = 0 }
+}
+
+# Zero-K.exe's icon for the windows; $null (keep the default) if the folder has none.
+function Get-ZkIcon([string]$dir) {
+    if (-not $dir) { return }
+    $exe = [IO.Path]::Combine($dir, 'Zero-K.exe')
+    if (Test-Path $exe) { [Drawing.Icon]::ExtractAssociatedIcon($exe) }
+}
+
+function Set-ZkIcon($form, [string]$dir) {
+    $icon = Get-ZkIcon $dir
+    if ($icon) { $form.Icon = $icon }
+}
+
+function Show-Error([string]$text) {
+    [void][Windows.Forms.MessageBox]::Show($text, 'Zero-K Direct', 'OK', 'Error')
+}
+
+# The one-time setup: which Zero-K folder, and your name (defaults to your Zero-K login).
+# Returns $true when saved.
+function Show-SetupDialog {
+    $dir = $ZkDir
+    if (-not (Test-ZkDir $dir)) { $dir = Get-DefaultZkDir }
+    $savedName = Get-SavedSetting $nameFile
+    $st = @{ AutoName = -not $savedName; Filling = $false }
+
+    $form = New-Control Form @{ Text = 'Zero-K Direct: setup'; Font = $script:uiFont; FormBorderStyle = 'FixedDialog'; MaximizeBox = $false; MinimizeBox = $false
+        StartPosition = 'CenterScreen'; AutoSize = $true; AutoSizeMode = 'GrowAndShrink'; Padding = (New-Object Windows.Forms.Padding (px 12)) }
+    Set-ZkIcon $form $dir
+    $grid = New-Grid 3
+    $intro = New-Control Label @{ AutoSize = $true; MaximumSize = (New-Object Drawing.Size (px 480), 0); Margin = (New-Object Windows.Forms.Padding 0, 0, 0, (px 10))
+        Text = 'Choose your Zero-K folder (the one with engine\ inside) and the name other players see. You can change both later under Settings.' }
+    $grid.Controls.Add($intro, 0, 0); $grid.SetColumnSpan($intro, 3)
+    $grid.Controls.Add((New-Control Label @{ Text = 'Zero-K folder'; AutoSize = $true; Anchor = 'Left' }), 0, 1)
+    $txtDir = New-Control TextBox @{ Text = [string]$dir; Width = (px 340) }
+    $grid.Controls.Add($txtDir, 1, 1)
+    $btnBrowse = New-Control Button @{ Text = 'Browse...'; AutoSize = $true }
+    $grid.Controls.Add($btnBrowse, 2, 1)
+    $lblDir = New-Control Label @{ AutoSize = $true; Margin = (New-Object Windows.Forms.Padding 3, 0, 3, (px 8)) }
+    $grid.Controls.Add($lblDir, 1, 2); $grid.SetColumnSpan($lblDir, 2)
+    $grid.Controls.Add((New-Control Label @{ Text = 'Your name'; AutoSize = $true; Anchor = 'Left' }), 0, 3)
+    $txtName = New-Control TextBox @{ Text = [string]$savedName; Width = (px 200) }
+    $grid.Controls.Add($txtName, 1, 3)
+    $lblName = New-Control Label @{ AutoSize = $true; Margin = (New-Object Windows.Forms.Padding 3, 0, 3, (px 8)) }
+    $grid.Controls.Add($lblName, 1, 4); $grid.SetColumnSpan($lblName, 2)
+    $buttons = New-Control FlowLayoutPanel @{ FlowDirection = 'RightToLeft'; AutoSize = $true; Dock = 'Fill'; Margin = 0 }
+    $btnOk = New-Control Button @{ Text = 'OK'; DialogResult = 'OK'; Width = (px 80) }
+    $btnCancel = New-Control Button @{ Text = 'Cancel'; DialogResult = 'Cancel'; Width = (px 80) }
+    $buttons.Controls.AddRange(@($btnCancel, $btnOk))
+    $grid.Controls.Add($buttons, 0, 5); $grid.SetColumnSpan($buttons, 3)
+    $form.Controls.Add($grid)
+    $form.AcceptButton = $btnOk
+    $form.CancelButton = $btnCancel
+
+    $validate = {
+        $d = $txtDir.Text.Trim('" ')
+        $dirOk = Test-ZkDir $d
+        if ($dirOk) {
+            $newest = Get-EngineDir -dir $d
+            $lblDir.Text = if ($newest) { "Found Zero-K (newest engine: $(Split-Path $newest -Leaf))" } else { 'Found Zero-K, but no engine with spring.exe in it.' }
+            $lblDir.ForeColor = 'ForestGreen'
+            $login = Get-ZkLoginName $d
+            if ($st.AutoName -and $login -and $txtName.Text -ne $login) { $st.Filling = $true; $txtName.Text = $login; $st.Filling = $false }
+        } else {
+            $lblDir.Text = 'No engine\win64 folder in there.'
+            $lblDir.ForeColor = 'Firebrick'
+        }
+        $nameOk = $txtName.Text.Trim() -match $namePattern
+        if (-not $nameOk) { $lblName.Text = 'Letters, digits, _ - [ ] only, up to 30.'; $lblName.ForeColor = 'Firebrick' }
+        elseif ($dirOk -and $txtName.Text -eq (Get-ZkLoginName $d)) { $lblName.Text = 'Your Zero-K login name.'; $lblName.ForeColor = 'Gray' }
+        else { $lblName.Text = ''; }
+        $btnOk.Enabled = $dirOk -and $nameOk
     }
+    $txtDir.Add_TextChanged($validate)
+    $txtName.Add_TextChanged({ if (-not $st.Filling) { $st.AutoName = $false }; & $validate })
+    $btnBrowse.Add_Click({
+        $fb = New-Control FolderBrowserDialog @{ Description = 'Your Zero-K folder (the one with engine\ inside)'; ShowNewFolderButton = $false }
+        if (Test-Path $txtDir.Text) { $fb.SelectedPath = $txtDir.Text }
+        if ($fb.ShowDialog($form) -eq 'OK') { $txtDir.Text = $fb.SelectedPath }
+    })
+    & $validate
+
+    if ($form.ShowDialog() -ne 'OK') { return $false }
+    $script:ZkDir = (Resolve-Path $txtDir.Text.Trim('" ')).Path
+    $script:Name = $txtName.Text.Trim()
+    Save-Setting $zkDirFile $script:ZkDir
+    Save-Setting $nameFile $script:Name
+    $true
+}
+
+function Write-GuiLog([string]$msg, [string]$color) {
+    $box = $script:ui.Log
+    $box.SelectionStart = $box.TextLength
+    $box.SelectionLength = 0
+    $box.SelectionColor = [Drawing.Color]::FromName($guiColors[$color])
+    $box.AppendText("$msg`r`n")
+    $box.ScrollToCaret()
+}
+
+function Update-GuiLobby($state) {
+    $ui = $script:ui
+    $ui.Map.Text = "$($state.Map)`n$($state.Game), engine $($state.Engine)"
+    $lb = $ui.Lobby
+    $lb.BeginUpdate()
+    $lb.Items.Clear()
+    $teams = @($state.Players | ForEach-Object Team) + @($state.Bots | ForEach-Object Team) | Where-Object { $_ -gt 0 } | Sort-Object -Unique
+    foreach ($t in $teams) {
+        [void]$lb.Items.Add("Team $t")
+        foreach ($p in @($state.Players | Where-Object Team -eq $t)) { [void]$lb.Items.Add("    $(Format-Player $p)") }
+        foreach ($b in @($state.Bots | Where-Object Team -eq $t)) { [void]$lb.Items.Add("    $($b.Name) [bot]") }
+    }
+    $specs = @($state.Players | Where-Object Team -eq 0)
+    if ($specs.Count) {
+        [void]$lb.Items.Add('Spectators')
+        foreach ($p in $specs) { [void]$lb.Items.Add("    $(Format-Player $p)") }
+    }
+    $lb.EndUpdate()
+    $me = $state.Players | Where-Object Name -eq $Name | Select-Object -First 1
+    if ($me -and $ui.Team.SelectedIndex -ne [int]$me.Team) {
+        $ui.Syncing = $true
+        $ui.Team.SelectedIndex = [Math]::Min([int]$me.Team, $ui.Team.Items.Count - 1)
+        $ui.Syncing = $false
+    }
+}
+
+# Enables what fits the connection state and shows progress; called on every timer tick.
+function Update-GuiStatus {
+    $ui = $script:ui
+    $j = $script:join
+    $active = $j -and -not $j.Done
+    $ui.Join.Text = if ($active) { 'Leave' } else { 'Join' }
+    $ui.Address.Enabled = -not $active
+    $ui.Name.Enabled = -not $active
+    $ui.Chat.Enabled = $active
+    $ui.Send.Enabled = $active
+    $ui.Team.Enabled = $active -and $j.State
+    $ui.Progress.Visible = $active -and $j.Dl
+    if (-not $active) { $status = 'Not connected. Enter the host''s address and press Join.' }
+    elseif (-not $j.Conn) { $status = "Connecting to $($j.HostName):$($j.HostPort)..." }
+    elseif ($j.Dl) {
+        $status = "Receiving $($j.Dl.Map): $([Math]::Round($j.Dl.Got / 1MB)) of $([Math]::Round($j.Dl.Size / 1MB)) MB"
+        if ($j.Dl.Size) { $ui.Progress.Value = [Math]::Min(100, [int]($j.Dl.Got * 100 / $j.Dl.Size)) }
+    }
+    elseif ($j.Downloads.Count) { $status = "Downloading $($j.Downloads[0].Kind) '$($j.Downloads[0].What)'..." }
+    elseif ($j.Game) { $status = 'In game. You come back here when the game closes.' }
+    else { $status = "In the lobby at $($j.HostName):$($j.HostPort). Waiting for the host to start." }
+    if ($ui.Status.Text -ne $status) { $ui.Status.Text = $status }
+}
+
+function Invoke-GuiJoin {
+    $ui = $script:ui
+    if ($script:join -and -not $script:join.Done) {
+        Close-Join $script:join
+        Say 'Left the lobby.' Yellow
+        return
+    }
+    $address = $ui.Address.Text.Trim()
+    $n = $ui.Name.Text.Trim()
+    if (-not $address) { Show-Error 'Enter the host''s address, like 203.0.113.5 or 203.0.113.5:8452.'; return }
+    if ($n -notmatch $namePattern) { Show-Error "Invalid name '$n' (letters, digits, _ - [ ] only, up to 30)."; return }
+    $script:Name = $n
+    Save-Setting $nameFile $n
+    Save-Setting $addressFile $address
+    $ui.Lobby.Items.Clear()
+    $ui.Map.Text = ''
+    $script:join = Open-Join $address
+    # Otherwise the Join button keeps focus, and as the focused button it takes Enter: typing a line and pressing Enter would leave.
+    Update-GuiStatus
+    [void]$ui.Chat.Focus()
+}
+
+function Send-GuiChat {
+    $line = $script:ui.Chat.Text.Trim()
+    $script:ui.Chat.Text = ''
+    if ($line -and $script:join) { Send-JoinChat $script:join $line }
+    [void]$script:ui.Chat.Focus()
+}
+
+function Start-HostTerminal {
+    $hostArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$scriptPath`"", 'host', '-ZkPath', "`"$ZkDir`"")
+    $n = $script:ui.Name.Text.Trim()
+    if ($n -match $namePattern) { $hostArgs += '-Name', $n }
+    Start-Process powershell.exe -ArgumentList $hostArgs
+}
+
+function Start-Gui {
+    Initialize-Gui
+    $script:Mode = 'join'  # names the engine script file
+    $haveSetup = (Test-ZkDir $ZkDir) -or ((Test-ZkDir (Get-SavedSetting $zkDirFile)) -and (Get-SavedSetting $nameFile))
+    if ($haveSetup) {
+        if (-not (Test-ZkDir $ZkDir)) { $script:ZkDir = Get-SavedSetting $zkDirFile }
+        if (-not $Name) { $script:Name = Get-SavedSetting $nameFile }
+        if (-not $Name) { $script:Name = Get-ZkLoginName $ZkDir }
+    } elseif (-not (Show-SetupDialog)) { return }
+
+    $form = New-Control Form @{ Text = 'Zero-K Direct'; Font = $script:uiFont; StartPosition = 'CenterScreen'
+        Size = (New-Object Drawing.Size (px 860), (px 560)); MinimumSize = (New-Object Drawing.Size (px 600), (px 380)) }
+    Set-ZkIcon $form $ZkDir
+    $root = New-Control TableLayoutPanel @{ Dock = 'Fill'; ColumnCount = 1; RowCount = 4; Padding = (New-Object Windows.Forms.Padding (px 8)) }
+    foreach ($style in 'AutoSize', 'Percent', 'AutoSize', 'AutoSize') { [void]$root.RowStyles.Add((New-Object Windows.Forms.RowStyle $style, 100)) }
+
+    $top = New-Grid 6
+    $top.Margin = New-Object Windows.Forms.Padding 0, 0, 0, (px 6)
+    $top.Controls.Add((New-Control Label @{ Text = 'Host address'; AutoSize = $true; Anchor = 'Left' }), 0, 0)
+    $txtAddress = New-Control TextBox @{ Width = (px 220); Text = $(if ($Address) { $Address -replace '^zkjoin://', '' -replace '/+$', '' } else { [string](Get-SavedSetting $addressFile) }) }
+    $top.Controls.Add($txtAddress, 1, 0)
+    $top.Controls.Add((New-Control Label @{ Text = 'Your name'; AutoSize = $true; Anchor = 'Left'; Margin = (New-Object Windows.Forms.Padding (px 10), 0, 3, 0) }), 2, 0)
+    $txtName = New-Control TextBox @{ Width = (px 160); Text = [string]$Name }
+    $top.Controls.Add($txtName, 3, 0)
+    $btnJoin = New-Control Button @{ Text = 'Join'; Width = (px 90); Margin = (New-Object Windows.Forms.Padding (px 10), 0, 0, 0) }
+    $top.Controls.Add($btnJoin, 4, 0)
+    $root.Controls.Add($top, 0, 0)
+
+    $split = New-Control SplitContainer @{ Dock = 'Fill'; FixedPanel = 'Panel2' }
+    $log = New-Control RichTextBox @{ Dock = 'Fill'; ReadOnly = $true; BackColor = 'White'; DetectUrls = $false; HideSelection = $false }
+    $split.Panel1.Controls.Add($log)
+    $side = New-Control TableLayoutPanel @{ Dock = 'Fill'; ColumnCount = 2; RowCount = 3; Padding = (New-Object Windows.Forms.Padding (px 6), 0, 0, 0) }
+    foreach ($style in 'AutoSize', 'Percent', 'AutoSize') { [void]$side.RowStyles.Add((New-Object Windows.Forms.RowStyle $style, 100)) }
+    [void]$side.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize'))
+    [void]$side.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100))
+    $lblMap = New-Control Label @{ AutoSize = $true; Font = (New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)); Margin = (New-Object Windows.Forms.Padding 0, 0, 0, (px 4)) }
+    $side.Controls.Add($lblMap, 0, 0); $side.SetColumnSpan($lblMap, 2)
+    $lobby = New-Control ListBox @{ Dock = 'Fill'; IntegralHeight = $false; SelectionMode = 'None' }
+    $side.Controls.Add($lobby, 0, 1); $side.SetColumnSpan($lobby, 2)
+    $side.Controls.Add((New-Control Label @{ Text = 'Play as'; AutoSize = $true; Anchor = 'Left' }), 0, 2)
+    $cmbTeam = New-Control ComboBox @{ DropDownStyle = 'DropDownList'; Dock = 'Fill' }
+    [void]$cmbTeam.Items.Add('Spectator')
+    foreach ($t in 1..16) { [void]$cmbTeam.Items.Add("Team $t") }
+    $side.Controls.Add($cmbTeam, 1, 2)
+    $split.Panel2.Controls.Add($side)
+    $root.Controls.Add($split, 0, 1)
+
+    $chatRow = New-Grid 2
+    [void]$chatRow.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100))
+    [void]$chatRow.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize'))
+    $chatRow.Margin = New-Object Windows.Forms.Padding 0, (px 6), 0, (px 4)
+    $txtChat = New-Control TextBox @{ Dock = 'Fill' }
+    $chatRow.Controls.Add($txtChat, 0, 0)
+    $btnSend = New-Control Button @{ Text = 'Send'; Width = (px 90) }
+    $chatRow.Controls.Add($btnSend, 1, 0)
+    $root.Controls.Add($chatRow, 0, 2)
+
+    $bottom = New-Grid 4
+    [void]$bottom.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100))
+    $lblStatus = New-Control Label @{ AutoSize = $true; Anchor = 'Left'; ForeColor = 'DimGray' }
+    $bottom.Controls.Add($lblStatus, 0, 0)
+    $progress = New-Control ProgressBar @{ Width = (px 160); Height = (px 14); Anchor = 'Right'; Visible = $false }
+    $bottom.Controls.Add($progress, 1, 0)
+    $lnkHost = New-Control LinkLabel @{ Text = 'Host a game...'; AutoSize = $true; Anchor = 'Right'; Margin = (New-Object Windows.Forms.Padding (px 12), 0, 0, 0) }
+    $bottom.Controls.Add($lnkHost, 2, 0)
+    $lnkSettings = New-Control LinkLabel @{ Text = 'Settings...'; AutoSize = $true; Anchor = 'Right'; Margin = (New-Object Windows.Forms.Padding (px 12), 0, 0, 0) }
+    $bottom.Controls.Add($lnkSettings, 3, 0)
+    $root.Controls.Add($bottom, 0, 3)
+    $form.Controls.Add($root)
+
+    $script:ui = [pscustomobject]@{ Form = $form; Address = $txtAddress; Name = $txtName; Join = $btnJoin; Log = $log; Map = $lblMap; Lobby = $lobby
+        Team = $cmbTeam; Chat = $txtChat; Send = $btnSend; Status = $lblStatus; Progress = $progress; Syncing = $false }
+    $script:join = $null
+
+    # Event handlers: errors go to the log rather than a stack of dialogs.
+    $guard = { param($action) try { & $action } catch { Say "Error: $($_.Exception.Message)" Red } }
+    $btnJoin.Add_Click({ & $guard { Invoke-GuiJoin; Update-GuiStatus } })
+    $txtAddress.Add_KeyDown({ if ($_.KeyCode -eq 'Enter') { $_.SuppressKeyPress = $true; & $guard { Invoke-GuiJoin } } })
+    $txtName.Add_KeyDown({ if ($_.KeyCode -eq 'Enter') { $_.SuppressKeyPress = $true; & $guard { Invoke-GuiJoin } } })
+    $btnSend.Add_Click({ & $guard { Send-GuiChat } })
+    $txtChat.Add_KeyDown({ if ($_.KeyCode -eq 'Enter') { $_.SuppressKeyPress = $true; & $guard { Send-GuiChat } } })
+    $cmbTeam.Add_SelectedIndexChanged({
+        if ($script:ui.Syncing -or -not $script:join) { return }
+        $i = $script:ui.Team.SelectedIndex
+        & $guard { Send-JoinChat $script:join $(if ($i -eq 0) { '/spec' } else { "/team $i" }) }
+    })
+    $lnkHost.Add_LinkClicked({ & $guard { Start-HostTerminal } })
+    $lnkSettings.Add_LinkClicked({
+        if ($script:join -and -not $script:join.Done) { Show-Error 'Leave the lobby first.'; return }
+        & $guard {
+            if (Show-SetupDialog) {
+                $script:ui.Name.Text = $Name
+                Set-ZkIcon $script:ui.Form $ZkDir
+                Install-Bundle
+                $script:EngineDir = Get-EngineDir $Engine
+                Say "Zero-K folder: $ZkDir" DarkGray
+            }
+        }
+    })
+
+    $timer = New-Control Timer @{ Interval = 50 }
+    $timer.Add_Tick({
+        $j = $script:join
+        if ($j -and -not $j.Done) {
+            try { Step-Join $j } catch { Say "Error: $($_.Exception.Message)" Red; Close-Join $j }
+        }
+        Update-GuiStatus
+    })
+    $form.Add_Shown({
+        $split.SplitterDistance = [Math]::Max((px 200), $split.Width - (px 250))
+        Update-GuiStatus
+        Say "Zero-K folder: $ZkDir" DarkGray
+        $script:ui.Status.Text = 'Checking the install...'
+        $form.Refresh()
+        & $guard { Install-Bundle }
+        $script:EngineDir = Get-EngineDir $Engine
+        if (-not $script:EngineDir) { Say "No engine in $ZkDir\engine\win64. Use Settings to pick another folder." Red }
+        $timer.Start()
+        if ($Address) { & $guard { Invoke-GuiJoin } }
+        elseif ($txtAddress.Text) { $txtName.Focus() } else { $txtAddress.Focus() }
+    })
+    $form.Add_FormClosing({
+        $timer.Stop()
+        if ($script:join -and -not $script:join.Done) { Close-Join $script:join }
+    })
+    [void]$form.ShowDialog()
 }
 
 # ---------------------------------------------------------------- main
@@ -718,22 +1154,30 @@ if ($Mode -eq 'install') {
     New-Item "$key\shell\open\command" -Force | Out-Null
     Set-Item $key 'URL:Zero-K direct join'
     New-ItemProperty $key 'URL Protocol' -Value '' -Force | Out-Null
-    Set-Item "$key\shell\open\command" "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" join `"%1`""
-    Write-Host "zkjoin:// links now open $PSCommandPath." -ForegroundColor Green
+    Set-Item "$key\shell\open\command" "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" gui `"%1`""
+    Write-Host "zkjoin:// links now open the join window." -ForegroundColor Green
+    return
+}
+
+if (-not $Mode -or $Mode -eq 'gui') {
+    try { Start-Gui }
+    catch {
+        $msg = "$($_.Exception.Message)`n`n$($_.ScriptStackTrace)"
+        try { Show-Error $msg } catch { Write-Host $msg -ForegroundColor Red }
+    }
     return
 }
 
 try {
+    if ($Mode -notin 'host', 'join') { throw "Mode must be 'host', 'join', 'gui' or 'install' (or nothing, for the join window)." }
     $ZkDir = Find-ZkDir
     Install-Bundle
-    if (-not $Mode) { $Mode = Read-Host 'host or join' }
-    if ($Mode -notin 'host', 'join') { throw "Mode must be 'host', 'join' or 'install'." }
     if ($Mode -eq 'join' -and -not $Address) { $Address = Read-Host 'Host address (ip or ip:port)' }
-    if (-not $Name -and (Test-Path $nameFile)) { $Name = (Get-Content $nameFile -Raw).Trim() }
+    if (-not $Name) { $Name = Get-SavedSetting $nameFile }
+    if (-not $Name) { $Name = Get-ZkLoginName $ZkDir }
     if (-not $Name) { $Name = Read-Host 'Your name' }
-    if ($Name -notmatch '^[A-Za-z0-9_\-\[\]]{1,30}$') { throw "Invalid name '$Name' (letters, digits, _ - [ ] only)." }
-    [void](New-Item $configDir -ItemType Directory -Force)
-    [IO.File]::WriteAllText($nameFile, $Name, $utf8)
+    if ($Name -notmatch $namePattern) { throw "Invalid name '$Name' (letters, digits, _ - [ ] only)." }
+    Save-Setting $nameFile $Name
 
     $script:EngineDir = Get-EngineDir $Engine
     if (-not (Test-Path (Join-Path $script:EngineDir 'spring.exe'))) { throw "No spring.exe in '$($script:EngineDir)'." }

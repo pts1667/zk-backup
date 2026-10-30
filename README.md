@@ -6,13 +6,17 @@ If your install is missing engine `2026.07.04` or Zero-K `v1.14.10.3`, download 
 
 ## Join a game
 
-```
-zk-direct.cmd join <host-ip> -Name YourName
-```
+Double-click **`zk-direct.cmd`**, enter the host's address and press **Join**.
 
-Chat in the lobby and wait for the host to start. Type `/spec` to spectate and `/play` to rejoin a team. If you're missing the map, the host sends it to you; a missing game version downloads automatically. When the match ends, you're back in the lobby.
+The first time, it asks for your Zero-K folder and name. Both are filled in from your install and Zero-K login.
+
+Chat in the lobby and wait for the host to start. Use **Play as** to spectate or switch teams. If you're missing the map, the host sends it to you; a missing game version downloads automatically. When the match ends, you're back in the lobby.
+
+In a terminal: `zk-direct.cmd join <host-ip> -Name YourName` (type `/spec` and `/play`).
 
 ## Host a game
+
+Hosting runs in a terminal. Click **Host a game...** in the window, or run:
 
 ```
 zk-direct.cmd host -Name YourName
@@ -36,9 +40,9 @@ Anything that isn't a command is chat. Players can use `/spec`, `/play` and `/te
 
 ## Options
 
-- `-ZkPath "D:\Games\Zero-K"`: your Zero-K folder. Without it, Steam installs are found automatically, and otherwise you're asked once.
+- `-ZkPath "D:\Games\Zero-K"`: your Zero-K folder for terminal use. Without it, the folder from setup is used, or one is found automatically. Change it in the window under **Settings...**.
 - `-Port 8452`, `-Map "TitanDuel 2.2"`: host settings.
-- `zk-direct.cmd install`: makes `zkjoin://<ip>` links open the join flow.
+- `zk-direct.cmd install`: makes `zkjoin://<ip>` links open the window and join.
 
 ## Updating the bundle
 
