@@ -6,24 +6,28 @@ Download the zip from the Releases page and extract it anywhere. It includes eng
 
 ## Join a game
 
-Double-click **`zk-direct.cmd`**, enter the host's address and press **Join**.
+Double-click **`zk-direct.cmd`**, enter the host's address (an IP like `203.0.113.5`, or a `https://....trycloudflare.com` address) and press **Join**.
 
 The first time, it asks for your Zero-K folder and name. Both are filled in from your install and Zero-K login.
 
-Chat in the lobby and wait for the host to start. Use **Play as** to spectate or switch teams. If you're missing the map, the host sends it to you; a missing game version downloads automatically. When the match ends, you're back in the lobby.
+Chat in the lobby and wait for the host to start. Use **Play as** to spectate or switch teams. If you're missing the map, the host sends it to you (through a Cloudflare tunnel it downloads from springfiles instead; if it isn't there, you sit that game out). A missing game version downloads automatically. When the match ends, you're back in the lobby.
 
 In a terminal: `zk-direct.cmd join <host-ip> -Name YourName` (type `/spec` and `/play`).
 
 ## Host a game
 
-Hosting runs in a terminal. Click **Host a game...** in the window, or run:
+Click **Host a game...** in the window, choose how players reach you (below) and press **Host**. The window becomes your lobby (its title says "(Hosting)"): type commands in the chat box and use **Play as** for yourself. **Stop hosting**, closing the window or `/quit` closes the lobby, after asking if other players are in it.
+
+Or host in a terminal (Ctrl+C or `/quit` closes the lobby):
 
 ```
 zk-direct.cmd host -Name YourName
 ```
 
-1. Make port **8452** (TCP and UDP) reachable: forward it on your router, or have everyone join the same VPN (e.g. Tailscale).
-2. Share the address the lobby prints.
+1. Let players reach you, in either or both of these ways (the host window has a checkbox for each):
+   - **Directly:** port **8452** (TCP and UDP). The script asks your router to open it (UPnP) and closes it when the lobby ends; it tells you if that didn't work. Otherwise forward it on your router, or have everyone join the same VPN (e.g. Tailscale).
+   - **Through a Cloudflare tunnel:** works with no open port, e.g. behind a phone hotspot or a second router. Download `cloudflared-windows-amd64.exe` from [cloudflared's releases](https://github.com/cloudflare/cloudflared/releases) (no account needed) and pick it in the host window, or for the terminal put it next to `zk-direct.cmd` or leave it in Downloads. The lobby then starts a quick tunnel and prints a `https://....trycloudflare.com` address, which changes every time you host. It adds a little latency. Maps aren't sent through it: tunnel players download missing maps from springfiles, and a player who can't get the map stays in the lobby when you `/start`.
+2. Share the address the lobby prints, or click the `zkjoinbk://` link above the player list to copy it.
 3. Set up the match and type `/start`.
 
 | Command | |
@@ -36,13 +40,13 @@ zk-direct.cmd host -Name YourName
 | `/kick <name>` | remove a player |
 | `/start`, `/quit` | start the match, close the lobby |
 
-Anything that isn't a command is chat. Players can use `/spec`, `/play` and `/team <n>` on themselves. Players missing the map get it from you automatically, and `/start` waits until they have it.
+Anything that isn't a command is chat. Players can use `/spec`, `/play` and `/team <n>` on themselves. Players missing the map get it automatically, and `/start` waits until they have it.
 
 ## Options
 
 - `-ZkPath "D:\Games\Zero-K"`: your Zero-K folder for terminal use. Without it, the folder from setup is used, or one is found automatically. Change it in the window under **Settings...**.
-- `-Port 8452`, `-Map "TitanDuel 2.2"`: host settings.
-- `zk-direct.cmd install`: makes `zkjoin://<ip>` links open the window and join.
+- `-Port 8452`, `-Map "TitanDuel 2.2"`: host settings. `-NoUpnp`: don't ask the router to open the port. `-NoTunnel`: don't start a Cloudflare tunnel even though cloudflared is there. `-Cloudflared <path>`: use that cloudflared.exe.
+- `zk-direct.cmd install`: makes `zkjoinbk://<ip>` links open the window and join.
 
 ## Updating the bundle
 
