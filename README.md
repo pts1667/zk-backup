@@ -37,8 +37,12 @@ zk-direct.cmd host -Name YourName
 | `/bot <team> [Easy\|Normal\|Hard\|Brutal]` | add an AI |
 | `/map <name>` | change map |
 | `/ffa` | everyone on their own team |
+| `/option <name> <value>`, `/option <name>` | set a game option, e.g. `/option metalmult 2`; reset it to the default |
+| `/options`, `/resetoptions` | list the options set, reset them all to the defaults |
 | `/kick <name>` | remove a player |
 | `/start`, `/quit` | start the match, close the lobby |
+
+Options include `metalmult`, `energymult`, `startmetal`, `startenergy`, `hpmult`, `damagemult`, `unitspeedmult`, `disablemapdamage 1` and `sharemode none`; the full list is in `ModOptions.lua` in the game archive. They stay set for every match in the lobby, and everyone sees them under the player list.
 
 Anything that isn't a command is chat. Players can use `/spec`, `/play` and `/team <n>` on themselves. Players missing the map get it automatically, and `/start` waits until they have it.
 

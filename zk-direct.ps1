@@ -387,6 +387,7 @@ function Show-Lobby($state) {
     }
     $specs = @($state.Players | Where-Object Team -eq 0 | ForEach-Object { Format-Player $_ })
     if ($specs.Count) { Say "    Spectators: $($specs -join ', ')" Cyan }
+    if (@($state.Options).Count) { Say "    Options: $(@($state.Options) -join ', ')" Cyan }
 }
 
 # ---------------------------------------------------------------- wire protocol: "TYPE {json}\n"
@@ -453,7 +454,27 @@ function Get-LobbyState {
         Players = @($script:players | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Team = $_.Team; InGame = $_.InGame; Downloading = $_.Downloading
                         NoMap = (Test-MissingMap $_) } })
         Bots    = @($script:bots | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Team = $_.Team; Ai = $_.Ai } })
+        Options = @(Format-ModOptions)
     }
+}
+
+# "metalmult=2"-style strings, for showing in the lobby.
+function Format-ModOptions { foreach ($o in $script:modOptions.GetEnumerator()) { "$($o.Key)=$($o.Value)" } }
+
+# /option <name> <value> sets one of the game's options (ModOptions.lua in the game archive), /option <name> resets it.
+function Set-ModOption([string]$key, [string]$value) {
+    $key = $key.ToLower()
+    if ($key -notmatch '^[a-z0-9_]+$') { Say "Option names are letters, digits and _, like metalmult." Red; return }
+    if (-not $value) {
+        if (-not $script:modOptions.Contains($key)) { Say "$key isn't set." Red; return }
+        $script:modOptions.Remove($key)
+        Send-Info "Option $key is back to the game's default."
+    } else {
+        if ($value -match '[;{}\[\]]') { Say "Option values can't contain ; { } [ or ]." Red; return }
+        $script:modOptions[$key] = $value
+        Send-Info "Option $key=$value"
+    }
+    Publish-State
 }
 
 # A player who couldn't download the current map; they stay in the lobby when the game starts.
@@ -535,7 +556,9 @@ function Build-HostScript($players) {
     }
     # Declare every ally team up to the highest used, so the engine doesn't renumber them.
     for ($a = 0; $a -le $maxAlly; $a++) { $l.Add("  [ALLYTEAM$a]"); $l.Add('  {'); $l.Add('    NumAllies=0;'); $l.Add('  }') }
-    $l.Add('  [MODOPTIONS]'); $l.Add('  {'); $l.Add('  }')
+    $l.Add('  [MODOPTIONS]'); $l.Add('  {')
+    foreach ($o in $script:modOptions.GetEnumerator()) { $l.Add("    $($o.Key)=$($o.Value);") }
+    $l.Add('  }')
     $l.Add('}')
     $l -join "`r`n"
 }
@@ -548,7 +571,11 @@ Commands (anything else is chat):
   /bot <team> [difficulty] add a CircuitAI bot      /unbot <name>    remove a bot
   /map <map name>         change map               /game <tag|name> change game (default zk:stable)
   /kick <name>            remove a player          /start           launch the game for everyone
+  /option <name> <value>  set a game option, e.g. /option metalmult 2 (/option <name> resets it)
+  /options                list the options set     /resetoptions    reset them all to the defaults
   /quit                   close the lobby
+Options include metalmult, energymult, startmetal, startenergy, hpmult, damagemult, unitspeedmult,
+disablemapdamage 1, sharemode none; the full list is in the game's ModOptions.lua.
 Players can use /spec, /play and /team <n> on themselves, and /quit to leave.
 Players missing the map get it from you automatically (Cloudflare tunnel players download it from
 springfiles instead; if it isn't there, they stay in the lobby when the game starts).
@@ -652,6 +679,18 @@ function Invoke-HostCommand([string]$line, $from) {
             $c = $script:conns | Where-Object { $_.Player -and $_.Player.Name -eq $Matches[1] } | Select-Object -First 1
             if ($c) { Send-Msg $c 'ERROR' @{ Text = 'You were kicked from the lobby.' }; $c.Dead = $true } else { Say "No remote player called '$($Matches[1])'." Red }
             return
+        }
+        '^/option\s+(\S+)(?:\s+(.+))?$' { Set-ModOption $Matches[1] ([string]$Matches[2]).Trim(); return }
+        '^/options$' {
+            $set = @(Format-ModOptions)
+            if ($set.Count) { Say "Options: $($set -join ', ')" Cyan } else { Say "No options set; the game's defaults apply. /help lists some." Cyan }
+            return
+        }
+        '^/resetoptions$' {
+            if (-not $script:modOptions.Count) { Say "No options are set." Red; return }
+            $script:modOptions.Clear()
+            Send-Info "All options are back to the game's defaults."
+            Publish-State; return
         }
         '^/start$' { Start-Match; return }
         '^/quit$' { $script:quit = $true; return }
@@ -1367,6 +1406,7 @@ function Open-Host {
 
     $script:players = [Collections.Generic.List[object]]::new()
     $script:bots = [Collections.Generic.List[object]]::new()
+    $script:modOptions = [ordered]@{}
     $script:conns = [Collections.Generic.List[object]]::new()
     $script:quit = $false
     $script:hostGame = $null
@@ -1841,6 +1881,10 @@ function Update-GuiLobby($state) {
     if ($specs.Count) {
         [void]$lb.Items.Add('Spectators')
         foreach ($p in $specs) { [void]$lb.Items.Add("    $(Format-Player $p)") }
+    }
+    if (@($state.Options).Count) {
+        [void]$lb.Items.Add('Options')
+        foreach ($o in @($state.Options)) { [void]$lb.Items.Add("    $o") }
     }
     $lb.EndUpdate()
     $me = $state.Players | Where-Object Name -eq $Name | Select-Object -First 1
